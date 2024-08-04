@@ -31,7 +31,7 @@ def critic_method(data):
     # 计算数据在每个特征上的方差
     variance = np.var(data, axis=0)
 
-    # 计算每个特征的对比度，即方差与平均值的比值
+    # 计算每个特征的变异系数，即方差与平均值的比值
     contrast = variance / mean_data
 
     # 计算数据的相关矩阵
@@ -44,7 +44,7 @@ def critic_method(data):
     # 计算每个特征的冲突度，即所有相关系数的绝对值之和
     conflict = np.sum(np.abs(correlation_matrix), axis=0)
 
-    # 计算每个特征的critic权重，即对比度与冲突度的乘积
+    # 计算每个特征的信息承载量，即变异系数与冲突度的乘积
     critic_weights = contrast * conflict
 
     # 归一化权重，确保它们的和为1
@@ -95,8 +95,8 @@ class Judge:
         critic_matrix = np.vstack((np.array(self.scores_criterion_1),
                                    np.array(self.scores_criterion_2),
                                    np.array(self.scores_criterion_3)))
-        # print(critic_matrix.T)
-        criric_weights = critic_method(critic_matrix.T)
+        # print(critic_matrix)
+        criric_weights = critic_method(critic_matrix)
 
         total_weights = ahp_weights * 0.8 + criric_weights * 0.2
         # 归一化总权重
@@ -108,14 +108,18 @@ class Judge:
 
 
 if __name__ == '__main__':
-    judge = Judge(5, [2, 7, 6], [4, 2, 2], [4, 1, 2])
+    judge = Judge(10, [6, 7, 4], [2, 2, 4], [2, 1, 2])
     score_strategy = judge.final_weights()
     print("score_strategy:", score_strategy)
-    # score_strategy: [1.96707869 1.59175119 1.44117012]
+
+    # [3.451007436455655, 3.312791614171911, 3.236200949372433]
+    # 部门A score_strategy: [4.11209142 3.12921093 2.75869765]
+    # 部门B score_strategy: [3.11181726 3.32219726 3.56598548]
+    # 部门C score_strategy: [3.12911363 3.48696666 3.38391971]
 
 """
 a a11 a12..
-b a21
+b a21       
 c a31
 d
 

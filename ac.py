@@ -1,133 +1,196 @@
 import torch
-import torch.nn as nn
 import torch.optim as optim
+from torch.optim.lr_scheduler import StepLR
 import numpy as np
 from newenv import AnomalyMetricEnv
+from ac_net import Actor, Critic
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-class Actor(nn.Module):
-    def __init__(self, state_dim, action_dim):
-        super(Actor, self).__init__()
-        self.fc1 = nn.Linear(state_dim, 128).to(device)
-        self.fc2 = nn.Linear(128, 256).to(device)
-        self.fc3 = nn.Linear(256, 128).to(device)
-        self.fc4 = nn.Linear(128, action_dim).to(device)
-        self.softmax = nn.Softmax(dim=-1)
-
-    def forward(self, state):
-        x = torch.relu(self.fc1(state))
-        x = torch.relu(self.fc2(x))
-        x = torch.relu(self.fc3(x))
-        x = self.fc4(x)
-        return self.softmax(x)
-
-
-class Critic(nn.Module):
-    def __init__(self, state_dim):
-        super(Critic, self).__init__()
-        self.fc1 = nn.Linear(state_dim, 128).to(device)
-        self.fc2 = nn.Linear(128, 256).to(device)
-        self.fc3 = nn.Linear(256, 128).to(device)
-        self.fc4 = nn.Linear(128, 1).to(device)
-
-    def forward(self, state):
-        x = torch.relu(self.fc1(state))
-        x = torch.relu(self.fc2(x))
-        x = torch.relu(self.fc3(x))
-        return self.fc4(x)
+# TODO: 论文   元学习         博弈论、强化学习  结果分析
 
 
 class ActorCriticAgent:
-    def __init__(self, env):
+    """
+    Actor-Critic强化学习算法的智能体类。
+
+    参数:
+    - env: 环境对象，用于与智能体交互。
+    - meta_lr: 元学习率，用于更新元模型参数。
+    - inner_lr: 内循环学习率，用于在每个episode中更新克隆模型参数。
+    - num_inner_steps: 每个episode中内循环更新的次数。
+    - scheduler_step_size: 学习率调度的步长。
+    - scheduler_gamma: 学习率调度的乘数。
+    """
+
+    def __init__(self, env, meta_lr=0.001, inner_lr=0.01, num_inner_steps=1, scheduler_step_size=200,
+                 scheduler_gamma=0.5):
+        # 初始化环境和模型参数
         self.env = env
         self.state_dim = env.observation_space.shape[0]
         self.action_dim = env.action_space.n
         self.actor = Actor(self.state_dim, self.action_dim).to(device)
         self.critic = Critic(self.state_dim).to(device)
-        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=0.001, weight_decay=0.01)
-        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=0.001, weight_decay=0.01)
-        self.actor_scheduler = optim.lr_scheduler.StepLR(self.actor_optimizer, step_size=100, gamma=0.9)
-        self.critic_scheduler = optim.lr_scheduler.StepLR(self.critic_optimizer, step_size=100, gamma=0.9)
+        self.meta_lr = meta_lr
+        self.inner_lr = inner_lr
+        self.num_inner_steps = num_inner_steps
+        # 初始化优化器和学习率调度
+        self.actor_meta_optimizer = optim.Adam(self.actor.parameters(), lr=self.meta_lr)
+        self.critic_meta_optimizer = optim.Adam(self.critic.parameters(), lr=self.meta_lr)
+        self.actor_scheduler = StepLR(self.actor_meta_optimizer, step_size=scheduler_step_size, gamma=scheduler_gamma)
+        self.critic_scheduler = StepLR(self.critic_meta_optimizer, step_size=scheduler_step_size, gamma=scheduler_gamma)
 
-    def select_action(self, state):
-        state = torch.tensor(state, dtype=torch.float32, device=device)
-        probs = self.actor(state)
-        action = np.random.choice(self.action_dim, p=probs.cpu().detach().numpy())
-        return action
+    def train(self, num_episodes=1000, gamma=0.98, num_training_attempts=5):
+        """
+        训练模型。
 
-    def train(self, num_episodes=5000, gamma=0.98):
-        initial_states = []  # 存储每集开始时的状态
-        strategy_sequences = []  # 存储每集中采取的所有策略序列
-        final_states = []  # 存储每集结束时的状态
+        参数:
+        - num_episodes (int): 训练的回合数，默认为1000。
+        - gamma (float): 折扣因子，默认为0.98。
+        - num_training_attempts (int): 每个回合的训练尝试次数，默认为5。
 
+        返回:
+        无。
+        """
+        # 初始化存储每个回合的初始状态、策略序列和最终状态的列表
+        initial_states = []
+        strategy_sequences = []
+        final_states = []
+
+        # 遍历每个回合
         for episode in range(num_episodes):
-            state = self.env.reset()  # 重置环境并获取初始状态
-            episode_reward = 0
-            episode_strategies = []
+            # 初始化当前最佳的回合奖励、初始状态、最终状态和策略序列
+            best_episode_reward = -float('inf')
+            best_initial_state = None
+            best_final_state = None
+            best_strategy_sequence = None
 
-            initial_states.append(state)  # 将初始状态存储到列表中
+            # 针对每个回合进行多次训练尝试
+            for attempt in range(num_training_attempts):
+                # 重置环境并获取初始状态
+                state = self.env.reset()
+                episode_reward = 0
+                episode_strategies = []
+                # 将当前回合的初始状态添加到列表中
+                initial_states.append(state)
+                # 克隆演员和评论家模型
+                actor_clone = self.clone_model(self.actor, self.state_dim, self.action_dim)
+                critic_clone = self.clone_model(self.critic, self.state_dim)
+                # 克隆模型的优化器
+                actor_clone_optimizer = optim.SGD(actor_clone.parameters(), lr=self.inner_lr)
+                critic_clone_optimizer = optim.SGD(critic_clone.parameters(), lr=self.inner_lr)
 
-            while True:
-                # 选择动作并执行，得到下一个状态和奖励
-                action = self.select_action(state)
-                next_state, reward, done, _ = self.env.step(action)
-                episode_reward += reward  # 更新总奖励
+                # 进行内循环步数的学习
+                for _ in range(self.num_inner_steps):
+                    # 与环境交互直到回合结束
+                    while True:
+                        # 选择动作并执行，获取下一个状态和奖励
+                        action = self.select_action(state, actor_clone)
+                        next_state, reward, done, _ = self.env.step(action)
+                        episode_reward += reward
 
-                # 将状态、下一个状态和奖励转换为张量
-                state_tensor = torch.tensor(state, dtype=torch.float32, device=device)
-                next_state_tensor = torch.tensor(next_state, dtype=torch.float32, device=device)
-                reward_tensor = torch.tensor(reward, dtype=torch.float32, device=device)
+                        # 将状态、下一个状态和奖励转换为张量
+                        state_tensor = torch.tensor(state, dtype=torch.float32, device=device)
+                        next_state_tensor = torch.tensor(next_state, dtype=torch.float32, device=device)
+                        reward_tensor = torch.tensor(reward, dtype=torch.float32, device=device)
 
-                # 计算价值函数
-                value = self.critic(state_tensor)
-                next_value = self.critic(next_state_tensor)
+                        # 计算当前状态和下一个状态的价值
+                        value = critic_clone(state_tensor)
+                        next_value = critic_clone(next_state_tensor)
 
-                # 计算目标值（TD Target），使用Bellman方程
-                target = reward_tensor + (1 - done) * gamma * next_value
-                target = target.detach()  # 避免计算图的梯度传播
-                current_value = self.critic(state_tensor)
+                        # 计算目标值
+                        target = reward_tensor + (1 - done) * gamma * next_value
+                        target = target.detach()
 
-                # 平滑更新目标值，使学习更稳定
-                smoothed_target = current_value + (target - current_value) * 0.1
+                        # 平滑目标值
+                        smoothed_target = value + (target - value) * 0.1
 
-                # 计算critic的损失，即预测值与目标值之间的差的平方
-                advantage = smoothed_target - value
-                critic_loss = advantage.pow(2).mean()
+                        # 计算评论家损失并反向传播
+                        critic_loss = (smoothed_target - value).pow(2).mean()
+                        critic_clone_optimizer.zero_grad()
+                        critic_loss.backward()
+                        torch.nn.utils.clip_grad_norm_(critic_clone.parameters(), max_norm=0.5)
+                        critic_clone_optimizer.step()
 
-                # 更新critic网络
-                self.critic_optimizer.zero_grad()
-                critic_loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=0.5)  # 梯度裁剪，避免梯度爆炸
-                self.critic_optimizer.step()
+                        # 计算日志概率和演员损失并反向传播
+                        log_prob = torch.log(actor_clone(state_tensor)[action])
+                        advantage = smoothed_target - value
+                        actor_loss = -log_prob * advantage.detach()
+                        actor_clone_optimizer.zero_grad()
+                        actor_loss.backward()
+                        actor_clone_optimizer.step()
 
-                # 计算actor的损失，即策略的对数概率乘以优势
-                log_prob = torch.log(self.actor(state_tensor)[action])
-                actor_loss = -log_prob * advantage.detach()
-                self.actor_optimizer.zero_grad()
-                actor_loss.backward()
-                self.actor_optimizer.step()
+                        # 如果回合结束，则记录当前策略并更新最佳状态和策略
+                        if done:
+                            episode_strategies.append(self.env.selected_strategies[-1])
+                            if episode_reward > best_episode_reward:
+                                best_episode_reward = episode_reward
+                                best_initial_state = initial_states[-1]
+                                best_final_state = next_state
+                                best_strategy_sequence = episode_strategies[:]
+                            break
 
-                # 如果集结束，记录相关信息并跳出循环
-                if done:
-                    episode_strategies.append(self.env.selected_strategies[-1])
-                    strategy_sequences.append(episode_strategies)
-                    final_states.append(next_state)
-                    print(f"Episode {episode + 1}, "
-                          f"初始偏移量: {initial_states[episode]}, "
-                          f"最终值: {final_states[episode]}, "
-                          f"采取的策略: {strategy_sequences[episode]}")
-                    break
-                state = next_state  # 更新当前状态为下一个状态
-                episode_strategies.append(self.env.selected_strategies[-1])  # 添加采取的策略到列表
+                        # 更新状态和策略
+                        state = next_state
+                        episode_strategies.append(self.env.selected_strategies[-1])
 
-            # 调整学习率
+            # 将当前回合的最佳策略序列和最终状态添加到列表中
+            strategy_sequences.append(best_strategy_sequence)
+            final_states.append(best_final_state)
+            # 打印当前回合的信息
+            print(f"Episode {episode + 1}, "
+                  f"初始偏移量: {best_initial_state}, "
+                  f"最终值: {best_final_state}, "
+                  f"采取的策略: {best_strategy_sequence}")
+
+            # 更新演员和评论家元优化器
+            actor_clone_optimizer.zero_grad()
+            for param, clone_param in zip(self.actor.parameters(), actor_clone.parameters()):
+                param.grad = (clone_param - param).detach()
+            self.actor_meta_optimizer.step()
+
+            critic_clone_optimizer.zero_grad()
+            for param, clone_param in zip(self.critic.parameters(), critic_clone.parameters()):
+                param.grad = (clone_param - param).detach()
+            self.critic_meta_optimizer.step()
+
+            # 更新学习率调度器
             self.actor_scheduler.step()
             self.critic_scheduler.step()
 
+    def clone_model(self, model, state_dim=None, action_dim=None):
+        # 根据模型类型创建并初始化克隆模型
+        if isinstance(model, Actor):
+            cloned_model = Actor(state_dim, action_dim).to(device)
+        elif isinstance(model, Critic):
+            cloned_model = Critic(state_dim).to(device)
+        # 加载原模型的参数
+        cloned_model.load_state_dict(model.state_dict())
+        return cloned_model
+
+    def select_action(self, state, model):
+        # 将状态转换为张量
+        state = torch.tensor(state, dtype=torch.float32, device=device)
+        # 计算状态对应的动作概率
+        probs = model(state)
+        # 根据概率选择动作
+        action = np.random.choice(self.action_dim, p=probs.cpu().detach().numpy())
+        return action
+
+    def save_models(self, path):
+        # 保存actor和critic模型的参数
+        torch.save(self.actor.state_dict(), f"{path}/actor.pth")
+        torch.save(self.critic.state_dict(), f"{path}/critic.pth")
+
+    def load_models(self, path):
+        # 加载actor和critic模型的参数
+        self.actor.load_state_dict(torch.load(f"{path}/actor.pth"))
+        self.critic.load_state_dict(torch.load(f"{path}/critic.pth"))
+
 
 if __name__ == "__main__":
-    env = AnomalyMetricEnv(normal_value=0, max_deviation=50, stability=0.2)
+    # 初始化环境和智能体，并开始训练
+    env = AnomalyMetricEnv(normal_value=0, max_deviation=20, stability=0.5)
     agent = ActorCriticAgent(env)
     agent.train()

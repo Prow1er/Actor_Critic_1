@@ -1,91 +1,79 @@
 import pandas as pd
-from sqlalchemy import create_engine
-
-# MySQL数据库配置
-db_user = '@localhost'
-db_password = '/GAMEmode1'
-db_host = 'localhost'
-db_name = 'your_database'
-
-# 创建数据库引擎
-engine = create_engine(f'mysql+pymysql://{db_user}:{db_password}@{db_host}/{db_name}')
-
-# 读取Excel文件
-excel_file_path = 'example.xlsx'
-df = pd.read_excel(excel_file_path, sheet_name='Sheet1')
+import mysql.connector
+from mysql.connector import Error
 
 
-# 数据预处理
-def process_data(df):
-    # 处理缺失值
-    df.fillna('', inplace=True)
+def create_connection():
+    """ 创建数据库连接 """
+    connection = None
+    try:
+        connection = mysql.connector.connect(
+            host="localhost",
+            user="root",
+            passwd="/GAMEmode1",
+            database="test_data"
+        )
+        print("Connection to MySQL DB successful")
+    except Error as e:
+        print(f"The error '{e}' occurred")
 
-    # 提取唯一异常区间
-    unique_intervals = df['异常区间'].unique()
-
-    # 创建空字典以存储每个异常区间的数据
-    interval_data = {}
-
-    for interval in unique_intervals:
-        # 选择特定异常区间的数据
-        interval_df = df[df['异常区间'] == interval]
-
-        # 提取策略组
-        strategy_groups = interval_df['策略组'].unique()
-
-        # 存储每个策略组的数据
-        interval_data[interval] = {}
-        for group in strategy_groups:
-            group_df = interval_df[interval_df['策略组'] == group]
-
-            # 存储每个部门的数据
-            departments = ['部门A', '部门B', '部门C']
-            for department in departments:
-                department_df = group_df[group_df[department] != '']
-
-                # 存储策略和约束准则
-                strategies = department_df[department].tolist()
-                criteria = department_df['约束准则'].tolist()
-                scores = department_df['评分(0-9)'].tolist()
-
-                # 将数据组织为字典
-                interval_data[interval][group] = {
-                    '部门': department,
-                    '策略': strategies,
-                    '约束准则': criteria,
-                    '评分': scores
-                }
-
-    return interval_data
+    return connection
 
 
-# 处理数据并存储到字典
-interval_data = process_data(df)
+def execute_query(connection, query):
+    """ 执行SQL查询 """
+    cursor = connection.cursor()
+    try:
+        cursor.execute(query)
+        connection.commit()
+        print("Query executed successfully")
+    except Error as e:
+        print(f"The error '{e}' occurred")
 
 
-# 插入数据到MySQL
-def insert_data_to_mysql(interval_data):
-    for interval, groups in interval_data.items():
-        for group, data in groups.items():
-            department = data['部门']
-            strategies = data['策略']
-            criteria = data['约束准则']
-            scores = data['评分']
-
-            for i in range(len(strategies)):
-                strategy = strategies[i]
-                criterion = criteria[i]
-                score = scores[i]
-
-                # 插入数据
-                query = f"""
-                INSERT INTO your_table (异常区间, 策略组, 部门, 策略, 约束准则, 评分)
-                VALUES ('{interval}', '{group}', '{department}', '{strategy}', '{criterion}', {score});
-                """
-
-                with engine.connect() as connection:
-                    connection.execute(query)
+def read_excel_file(filename):
+    """ 读取Excel文件并返回DataFrame """
+    df = pd.read_excel(filename, engine='openpyxl')
+    return df
 
 
-# 执行插入数据函数
-insert_data_to_mysql(interval_data)
+def insert_data(connection, data):
+    """ 插入数据到MySQL数据库 """
+    cursor = connection.cursor()
+
+    # 替换 DataFrame 中的 NaN/None 值为 None，以便在 SQL 语句中被解释为 NULL
+    data = data.where(pd.notnull(data), None)
+
+    # 使用正确的占位符
+    sql = ("INSERT INTO strategies (指标, 异常区间, 策略组, 部门A, 约束准则A, 评分A, 部门B, 约束准则B, 评分B, 部门C, 约束准则C, 评分C) \
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)")
+
+    # 遍历 DataFrame 的每一行并插入数据
+    for index, row in data.iterrows():
+        val = tuple(row)
+        cursor.execute(sql, val)
+
+    connection.commit()
+    cursor.close()
+
+
+class Load:
+    def __init__(self):
+        self.connection = create_connection()
+
+    def loading(self):
+
+        # 读取Excel文件
+        df = read_excel_file('example.xlsx')
+
+        # 插入数据
+        insert_data(self.connection, df)
+
+        # 查询数据
+        query = "SELECT * FROM strategies;"
+        execute_query(self.connection, query)
+
+
+if __name__ == "__main__":
+    loader = Load()
+    loader.loading()

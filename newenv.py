@@ -1,11 +1,11 @@
 import gym
 from gym import spaces
 import numpy as np
-from strategy_library import StrategyLibrary
+from s_l import StrategyLibrary
 
 
 class AnomalyMetricEnv(gym.Env):
-    def __init__(self, normal_value=0, max_deviation=50, stability = 0.2):
+    def __init__(self, normal_value=0, max_deviation=20, stability=0.2):
         super(AnomalyMetricEnv, self).__init__()
 
         self.normal_value = normal_value
@@ -50,7 +50,8 @@ class AnomalyMetricEnv(gym.Env):
         self.selected_strategies.append(selected_strategy.name)  # 记录所选策略
 
         # 计算奖励，目标是使状态接近正常值
-        reward = -(100*(abs(self.state - self.normal_value)))
+        reward = - 50 * (abs(self.state - self.normal_value) ** 2)
+        # reward = -(500 * (abs(self.state - self.normal_value)))
 
         # 检查是否达到终止条件
         done = abs(self.state - self.normal_value) < self.stability
@@ -66,7 +67,6 @@ class AnomalyMetricEnv(gym.Env):
         pass
 
 
-# 测试自定义环境
 if __name__ == "__main__":
     env = AnomalyMetricEnv()
     state = env.reset()
